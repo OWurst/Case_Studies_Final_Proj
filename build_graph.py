@@ -1011,7 +1011,7 @@ def load_quarter(conn: pyodbc.Connection, run_id: int, q: QuarterInfo) -> None:
             GROUP BY
                 s.year, s.quarter, s.year_quarter,
                 gn.graph_node_id, fn.graph_node_id, gws.waste_stream_id
-            ON CONFLICT (year_quarter, generator_node_id, facility_node_id, waste_stream_id) DO NOTHING;
+            ;
             """,
             params=(q.year_quarter,),
             label=f"{q.label}: insert generator->facility edges",
@@ -1057,7 +1057,7 @@ def load_quarter(conn: pyodbc.Connection, run_id: int, q: QuarterInfo) -> None:
             GROUP BY
                 s.year, s.quarter, s.year_quarter,
                 gn.graph_node_id, tn.graph_node_id, gws.waste_stream_id
-            ON CONFLICT (year_quarter, generator_node_id, transporter_node_id, waste_stream_id) DO NOTHING;
+            ;
             """,
             params=(q.year_quarter,),
             label=f"{q.label}: insert generator->transporter edges",
@@ -1103,7 +1103,7 @@ def load_quarter(conn: pyodbc.Connection, run_id: int, q: QuarterInfo) -> None:
             GROUP BY
                 s.year, s.quarter, s.year_quarter,
                 tn.graph_node_id, fn.graph_node_id, gws.waste_stream_id
-            ON CONFLICT (year_quarter, transporter_node_id, facility_node_id, waste_stream_id) DO NOTHING;
+            ;
             """,
             params=(q.year_quarter,),
             label=f"{q.label}: insert transporter->facility edges",
