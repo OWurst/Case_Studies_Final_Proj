@@ -1,2 +1,7 @@
 *.yaml
 /.venv/
+*.json
+*.csv
+/__pycache__/
+*.h5
+*.joblib
