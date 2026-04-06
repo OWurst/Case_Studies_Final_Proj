@@ -142,7 +142,7 @@ class DataLoader:
         df = self.transform_output_to_labels(df)
 
         # drop uid, year_quarter, quarter, and facility_epaid as features for the simple model
-        df.drop(columns=['uid', 'year_quarter', 'quarter_start', 'facility_epaid'], inplace=True)
+        df.drop(columns=['uid', 'year_quarter', 'quarter_start', 'facility_epaid', 'next_qty_tons'], inplace=True)
 
         # drop rows with nulls for lags
         df.dropna(inplace=True)
