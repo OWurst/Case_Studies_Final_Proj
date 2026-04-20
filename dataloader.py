@@ -3,6 +3,10 @@ import pyodbc
 from datetime import datetime
 import pandas as pd
 import numpy as np
+import warnings
+
+# Suppress pandas warning about DBAPI2 connections
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy*", category=UserWarning)
 
 BATCH_SIZE = 1000
 SIMPLE_TABLE = "ml.mv_facility_waste_simple_train"
@@ -23,6 +27,8 @@ class DataLoader:
         self.graph_offset = 0
         self.simple_categorical_levels = {}
         self.simple_expected_ohe_columns = []
+        self.graph_categorical_levels = {}
+        self.graph_expected_ohe_columns = []
         self.connect_to_database('config.yaml')
 
     def reset_offsets(self):
@@ -47,7 +53,7 @@ class DataLoader:
         )
         self.conn = pyodbc.connect(conn_str)
 
-        log(f"Connection initialized: {conn_str}")
+        log(f"Connection initialized: driver={driver}, server={pg['host']}, port={pg['port']}, database={pg['database']}")
         return self.conn
 
     def get_total_pages(self, table, batch_size=BATCH_SIZE, process='train'):
@@ -97,44 +103,61 @@ class DataLoader:
         df.drop(columns=['target_class'], inplace=True)
         return df
     
-    def get_simple_categorical_domains(self):
+    def get_categorical_domains(self, table, categorical_cols):
         if self.conn is None:
             raise RuntimeError("Database connection must be initialized before loading categorical domains.")
 
-        categorical_cols = ['waste_code', 'mode_form_code', 'mode_source_code']
-        self.simple_categorical_levels = {}
-
+        categorical_levels = {}
         for col in categorical_cols:
-            query = f"SELECT DISTINCT {col} FROM {SIMPLE_TABLE} WHERE {col} IS NOT NULL"
+            query = f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL"
             values = pd.read_sql(query, self.conn)[col]
-            self.simple_categorical_levels[col] = sorted(values.astype(str).unique())
+            categorical_levels[col] = sorted(values.astype(str).unique())
 
-        # Build the expected column order for deterministic one-hot encoding
         sample = pd.DataFrame({
-            col: pd.Categorical([], categories=self.simple_categorical_levels[col])
+            col: pd.Categorical([], categories=categorical_levels[col])
             for col in categorical_cols
         })
-        sample = pd.get_dummies(sample, columns=categorical_cols, drop_first=True)
-        self.simple_expected_ohe_columns = sample.columns.tolist()
+        expected_columns = pd.get_dummies(sample, columns=categorical_cols, drop_first=True).columns.tolist()
+        return categorical_levels, expected_columns
+
+    def get_simple_categorical_domains(self):
+        categorical_cols = ['waste_code', 'mode_form_code', 'mode_source_code']
+        self.simple_categorical_levels, self.simple_expected_ohe_columns = self.get_categorical_domains(
+            SIMPLE_TABLE,
+            categorical_cols,
+        )
         return self.simple_categorical_levels
 
-    def one_hot_encode_categoricals(self, df):
-        categorical_cols = ['waste_code', 'mode_form_code', 'mode_source_code']
+    def get_graph_categorical_domains(self):
+        categorical_cols = ['management_method_code', 'form_code', 'source_code']
+        self.graph_categorical_levels, self.graph_expected_ohe_columns = self.get_categorical_domains(
+            GRAPH_TABLE,
+            categorical_cols,
+        )
+        return self.graph_categorical_levels
+
+    def one_hot_encode_categoricals(self, df, categorical_cols, categorical_levels, expected_ohe_columns, table=None):
         if len(categorical_cols) == 0:
             return df
 
-        if not self.simple_expected_ohe_columns:
-            self.get_simple_categorical_domains()
+        if not expected_ohe_columns:
+            if table is None:
+                raise RuntimeError("Table name must be provided when expected OHE columns are not yet initialized.")
+            categorical_levels, expected_ohe_columns = self.get_categorical_domains(table, categorical_cols)
 
-        for col in categorical_cols:
-            if col in df.columns and col in self.simple_categorical_levels:
-                df[col] = pd.Categorical(df[col].astype(str), categories=self.simple_categorical_levels[col])
+        encode_cols = [col for col in categorical_cols if col in df.columns]
+        if not encode_cols:
+            return df
 
-        df = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
+        for col in encode_cols:
+            if col in categorical_levels:
+                df[col] = pd.Categorical(df[col].astype(str), categories=categorical_levels[col])
 
-        if self.simple_expected_ohe_columns:
-            non_ohe_cols = [c for c in df.columns if c not in self.simple_expected_ohe_columns]
-            df = df.reindex(columns=non_ohe_cols + self.simple_expected_ohe_columns, fill_value=0)
+        df = pd.get_dummies(df, columns=encode_cols, drop_first=True)
+
+        if expected_ohe_columns:
+            non_ohe_cols = [c for c in df.columns if c not in expected_ohe_columns]
+            df = df.reindex(columns=non_ohe_cols + expected_ohe_columns, fill_value=0)
 
         return df
 
@@ -152,13 +175,45 @@ class DataLoader:
         cols_to_drop = [c for c in object_cols if c not in ['waste_code', 'mode_form_code', 'mode_source_code']]
         df.drop(columns=cols_to_drop, inplace=True)
 
-        df = self.one_hot_encode_categoricals(df)
+        df = self.one_hot_encode_categoricals(
+            df,
+            categorical_cols=['waste_code', 'mode_form_code', 'mode_source_code'],
+            categorical_levels=self.simple_categorical_levels,
+            expected_ohe_columns=self.simple_expected_ohe_columns,
+            table=SIMPLE_TABLE,
+        )
 
         return df
 
     def transform_page_graph(self, df):
         df = self.transform_output_to_labels(df)
-        
+
+        # drop features 
+        df.drop(columns=['uid', 'year_quarter', 'year', 'quarter', 'facility_epaid', 'facility_node_id', 'waste_stream_key', 'display_name', 'first_shipped_date', 'last_shipped_date'], inplace=True)
+
+        # drop rows with nulls for lags
+        df.dropna(subset=[c for c in df.columns if 'lag' in c], inplace=True)
+
+        # make nans 0 for non-lag features
+        non_lag_cols = [c for c in df.columns if 'lag' not in c and c != 'target']
+        df[non_lag_cols] = df[non_lag_cols].fillna(0)
+
+        object_cols = df.select_dtypes(include=['object', 'string']).columns
+
+        needed_cats_list = ['management_method_code', 'form_code', 'source_code']
+
+        cols_to_drop = [c for c in object_cols if c not in needed_cats_list]
+
+        df.drop(columns=cols_to_drop, inplace=True)
+
+        df = self.one_hot_encode_categoricals(
+            df,
+            categorical_cols=needed_cats_list,
+            categorical_levels=self.graph_categorical_levels,
+            expected_ohe_columns=self.graph_expected_ohe_columns,
+            table=GRAPH_TABLE,
+        )
+
         return df
     ###########################
 
@@ -171,6 +226,9 @@ class DataLoader:
         
         transformed_df = self.transform_page_simple(df)
         
+        if transformed_df.shape[0] == 0:
+            return None, None
+        
         X, y = self.pandas_page_to_training_data(transformed_df)
         return X, y
 
@@ -182,6 +240,9 @@ class DataLoader:
         self.graph_offset += batch_size
         
         transformed_df = self.transform_page_graph(df)
+
+        if transformed_df.shape[0] == 0:
+            return None, None
 
         X, y = self.pandas_page_to_training_data(transformed_df)
         return X, y
@@ -208,13 +269,14 @@ if __name__ == "__main__":
         log("No records found in simple table.")
 
 
-    # # write one test page load for graph table to a file
-    # X_graph, y_graph = dataloader.get_next_page_graph()
-    # if X_graph is not None and y_graph is not None:
-    #     X_graph.to_csv('X_graph_test_page.csv', index=False)
-    #     y_graph.to_csv('y_graph_test_page.csv', index=False)
-    #     log("Saved test page for graph table to CSV files.")
-    # else:
-    #     log("No records found in graph table.")
+    # write numpy to csv for one test page load for graph table
+    X_graph, y_graph = dataloader.get_next_page_graph()
+    if X_graph is not None and y_graph is not None:
+        print(X_graph.shape, y_graph.shape)
+        np.savetxt('X_graph_test_page.csv', X_graph, delimiter=',')
+        np.savetxt('y_graph_test_page.csv', y_graph, delimiter=',')
+        log("Saved test page for graph table to CSV files.")
+    else:
+        log("No records found in graph table.")
 
 

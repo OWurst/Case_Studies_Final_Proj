@@ -33,10 +33,27 @@ class keras_wrapper():
         else:
             self.model = model
 
+    def is_fitted(self):
+        """Check if the Keras model has been trained (has weights)."""
+        try:
+            return len(self.model.weights) > 0
+        except:
+            return False
+
+    def ensure_fitted(self):
+        """Try to load model if not fitted."""
+        if not self.is_fitted():
+            try:
+                self.model = keras.models.load_model('keras_wrapper.h5')
+                log("Loaded existing Keras model from keras_wrapper.h5")
+            except Exception as e:
+                raise ValueError(f"Model is not fitted and cannot load pre-trained model: {e}")
+
     def train(self, X, y):
         self.model.train_on_batch(X, y)
 
     def predict(self, X, y):
+        self.ensure_fitted()
         return np.argmax(self.model.predict(X, verbose=0), axis=-1)
 
     def save(self):
@@ -60,6 +77,24 @@ class sklearn_wrapper():
             self.first_fit = True
             self.classes = classes
 
+    def is_fitted(self):
+        """Check if the sklearn model has been fitted."""
+        try:
+            from sklearn.utils.validation import check_is_fitted
+            check_is_fitted(self.model)
+            return True
+        except:
+            return False
+
+    def ensure_fitted(self):
+        """Try to load model if not fitted."""
+        if not self.is_fitted():
+            try:
+                self.model = joblib.load('sklearn_wrapper.joblib')
+                log("Loaded existing sklearn model from sklearn_wrapper.joblib")
+            except Exception as e:
+                raise ValueError(f"Model is not fitted and cannot load pre-trained model: {e}")
+
     def train(self, X, y):
         if self.first_fit:
             self.model.fit(X, y)
@@ -68,6 +103,7 @@ class sklearn_wrapper():
             self.model.partial_fit(X, y, classes=self.classes)
 
     def predict(self, X, y):
+        self.ensure_fitted()
         return self.model.predict(X)
     
     def save(self):
@@ -111,8 +147,6 @@ class Modeler():
                     break
                 
                 self.model.train(X, y)
-            
-            self.dataloader.reset_offsets()  # reset offsets after each epoch to start from the beginning of the data
         
         log("Training complete for model " + self.model.__class__.__name__)
         # save the model after training
@@ -121,8 +155,34 @@ class Modeler():
     def tune_hyperparameters(self):
         pass
 
-    def evaluate(self, data_type='simple'):
+    def evaluate(self, data_type='simple', model_name=None):
         log(f"Starting evaluation on {data_type} data for model {self.model.__class__.__name__}  ...")
+        
+        # Check if model is fitted, try to load if not
+        if isinstance(self.model, sklearn_wrapper):
+            try:
+                from sklearn.utils.validation import check_is_fitted
+                check_is_fitted(self.model.model)
+            except Exception as e:
+                log(f"Model not fitted ({e}), attempting to load from disk...")
+                try:
+                    model_filename = self.model.model.__class__.__name__ + '.joblib'
+                    self.model.model = joblib.load(model_filename)
+                    log(f"Successfully loaded sklearn model from {model_filename}")
+                except Exception as load_e:
+                    raise ValueError(f"Model is not fitted and failed to load: {load_e}")
+        elif isinstance(self.model, keras_wrapper):
+            try:
+                if not (hasattr(self.model.model, 'weights') and len(self.model.model.weights) > 0):
+                    raise ValueError("Model has no weights")
+            except Exception as e:
+                log(f"Model not fitted, attempting to load from disk...")
+                try:
+                    model_filename = self.model.model.__class__.__name__ + '.h5'
+                    self.model.model = keras.models.load_model(model_filename)
+                    log(f"Successfully loaded Keras model from {model_filename}")
+                except Exception as load_e:
+                    raise ValueError(f"Model is not fitted and failed to load: {load_e}")
         
         if data_type == 'simple':
             batches, total_records = self.dataloader.setup_simple()
@@ -143,8 +203,16 @@ class Modeler():
                 X, y = self.dataloader.get_next_page_graph(process='test')
             
             if X is None or y is None:
+                # if this isnt the last batch we just continue
+                if batch_num != batches - 1:
+                    continue
+
                 log("No more data to load. Ending evaluation early.")
                 break
+
+            if model_name == 'NB':
+                # make all values non-negative for NB
+                X = np.where(X < 0, 0, X)
 
             y_pred = self.model.predict(X, y)
             y_true_all.extend(np.asarray(y).tolist())

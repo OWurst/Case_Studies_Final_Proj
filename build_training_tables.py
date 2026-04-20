@@ -647,10 +647,10 @@ def main():
     conn = get_pg_connection(cfg)
 
     # Build each separately so one failure does not block the other.
-    try:
-        build_simple_mv(conn)
-    except Exception as e:
-        print(f"SIMPLE MV FAILED: {e}")
+    # try:
+    #     build_simple_mv(conn)
+    # except Exception as e:
+    #     print(f"SIMPLE MV FAILED: {e}")
 
     try:
         build_graph_mv(conn)
